@@ -1,0 +1,154 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <SPI.h>
+#include <MFRC522.h>
+#include <LiquidCrystal.h>
+
+// Konfigurasi RFID
+#define SS_PIN 5
+#define RST_PIN 22
+MFRC522 rfid(SS_PIN, RST_PIN);
+
+// Konfigurasi LCD (RS, EN, D4, D5, D6, D7)
+LiquidCrystal lcd(13, 12, 14, 27, 26, 25);
+
+// Konfigurasi Access Point
+const char* ssid = "ESP32_RFID_System";
+const char* password = "password123";
+
+WebServer server(80);
+
+// Variabel Data
+String lastUID = "";
+String statusMsg = "Menunggu Kartu...";
+struct UserData {
+  String uid;
+  String nama;
+  String kelas;
+};
+UserData registeredUsers[10]; // Kapasitas 10 data (bisa ditambah)
+int userCount = 0;
+
+// Fungsi HTML dengan CSS Modern
+String getHTML() {
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<style>";
+  html += "body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7f6; margin: 0; padding: 20px; color: #333; }";
+  html += ".container { max-width: 600px; margin: auto; background: white; padding: 25px; border-radius: 15px; box-shadow: 0 10px 25px rgba(0,0,0,0.1); }";
+  html += "h2 { color: #2c3e50; text-align: center; }";
+  html += ".card { background: #e8f0fe; padding: 15px; border-radius: 10px; margin-bottom: 20px; border-left: 5px solid #2196F3; }";
+  html += "input[type=text] { width: 100%; padding: 12px; margin: 8px 0; display: inline-block; border: 1px solid #ccc; border-radius: 8px; box-sizing: border-box; }";
+  html += "button { width: 100%; background-color: #4CAF50; color: white; padding: 14px 20px; margin: 8px 0; border: none; border-radius: 8px; cursor: pointer; font-size: 16px; transition: 0.3s; }";
+  html += "button:hover { background-color: #45a049; }";
+  html += "table { width: 100%; border-collapse: collapse; margin-top: 20px; }";
+  html += "th, td { text-align: left; padding: 12px; border-bottom: 1px solid #ddd; }";
+  html += "th { background-color: #2196F3; color: white; }";
+  html += ".uid-display { font-weight: bold; color: #d32f2f; }";
+  html += "</style></head><body>";
+
+  html += "<div class='container'>";
+  html += "<h2>System Management RFID</h2>";
+  
+  // Section Scan Terakhir
+  html += "<div class='card'>";
+  html += "<strong>Scan Terakhir:</strong><br>";
+  html += "UID: <span class='uid-display'>" + (lastUID == "" ? "Belum ada kartu" : lastUID) + "</span>";
+  html += "</div>";
+
+  // Form Input
+  html += "<form action='/save' method='POST'>";
+  html += "Nama: <input type='text' name='nama' placeholder='Masukkan Nama' required>";
+  html += "Kelas: <input type='text' name='kelas' placeholder='Masukkan Kelas' required>";
+  html += "<input type='hidden' name='uid' value='" + lastUID + "'>";
+  html += "<button type='submit'>Simpan ke Database</button>";
+  html += "</form>";
+
+  // Tabel Data
+  html += "<h3>Daftar Terdaftar</h3>";
+  html += "<table><tr><th>Nama</th><th>Kelas</th><th>UID</th></tr>";
+  for(int i = 0; i < userCount; i++) {
+    html += "<tr><td>" + registeredUsers[i].nama + "</td><td>" + registeredUsers[i].kelas + "</td><td>" + registeredUsers[i].uid + "</td></tr>";
+  }
+  html += "</table>";
+  
+  html += "<button onclick='location.reload()' style='background-color: #888; margin-top: 20px;'>Refresh Halaman</button>";
+  html += "</div></body></html>";
+  return html;
+}
+
+void handleRoot() {
+  server.send(200, "text/html", getHTML());
+}
+
+void handleSave() {
+  if (server.hasArg("nama") && server.hasArg("uid") && server.arg("uid") != "") {
+    if (userCount < 10) {
+      registeredUsers[userCount].nama = server.arg("nama");
+      registeredUsers[userCount].kelas = server.arg("kelas");
+      registeredUsers[userCount].uid = server.arg("uid");
+      userCount++;
+      
+      lcd.clear();
+      lcd.setCursor(0,0);
+      lcd.print("Data Tersimpan!");
+      delay(2000);
+    }
+  }
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+void setup() {
+  Serial.begin(115200);
+  SPI.begin();
+  rfid.PCD_Init();
+  
+  lcd.begin(16, 2);
+  lcd.print("System Starting");
+
+  // Setup WiFi AP
+  WiFi.softAP(ssid, password);
+  IPAddress IP = WiFi.softAPIP();
+  
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("AP: ESP32_RFID");
+  lcd.setCursor(0, 1);
+  lcd.print(IP.toString());
+  
+  server.on("/", handleRoot);
+  server.on("/save", HTTP_POST, handleSave);
+  server.begin();
+  
+  delay(2000);
+  lcd.clear();
+  lcd.print("Siap Scan...");
+}
+
+void loop() {
+  server.handleClient();
+
+  // Cek jika ada kartu baru
+  if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+    String strID = "";
+    for (byte i = 0; i < rfid.uid.size; i++) {
+      strID += String(rfid.uid.uidByte[i] < 0x10 ? "0" : "");
+      strID += String(rfid.uid.uidByte[i], HEX);
+    }
+    strID.toUpperCase();
+    lastUID = strID;
+
+    // Tampilkan di LCD
+    lcd.clear();
+    lcd.setCursor(0, 0);
+    lcd.print("UID Terdeteksi:");
+    lcd.setCursor(0, 1);
+    lcd.print(lastUID);
+
+    Serial.println("Kartu Terdeteksi: " + lastUID);
+    
+    rfid.PICC_HaltA();
+    rfid.PCD_StopCrypto1();
+  }
+}
