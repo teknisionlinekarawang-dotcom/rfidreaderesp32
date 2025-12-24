@@ -1,0 +1,165 @@
+#include <WiFi.h>
+#include <WebServer.h>
+#include <SPI.h>
+#include <MFRC522.h>
+#include <LiquidCrystal.h>
+
+// Konfigurasi RFID
+#define SS_PIN 5
+#define RST_PIN 22
+MFRC522 rfid(SS_PIN, RST_PIN);
+
+// Konfigurasi LCD (RS, EN, D4, D5, D6, D7)
+LiquidCrystal lcd(13, 12, 14, 27, 26, 25);
+
+// Konfigurasi Access Point
+const char* ssid = "Absensi_Suara_ESP32";
+const char* password = "password123";
+
+WebServer server(80);
+
+// Struktur Data
+struct UserData {
+  String uid;
+  String nama;
+  String kelas;
+  bool isInside; // Status Tap In / Tap Out
+};
+
+UserData users[20]; 
+int userCount = 0;
+String lastScannedName = "";
+String lastStatusAction = ""; // "masuk" atau "keluar"
+
+// Fungsi HTML + CSS + JavaScript Voice
+String getHTML() {
+  String html = "<!DOCTYPE html><html><head>";
+  html += "<meta charset='UTF-8'><meta name='viewport' content='width=device-width, initial-scale=1'>";
+  html += "<style>";
+  html += "body { font-family: 'Poppins', sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; margin: 0; display: flex; justify-content: center; align-items: center; color: #333; }";
+  html += ".container { width: 90%; max-width: 500px; background: white; padding: 30px; border-radius: 20px; box-shadow: 0 15px 35px rgba(0,0,0,0.2); }";
+  html += "h2 { text-align: center; color: #4a5568; margin-bottom: 25px; }";
+  html += ".status-box { background: #edf2f7; padding: 15px; border-radius: 12px; text-align: center; margin-bottom: 20px; border: 2px dashed #cbd5e0; }";
+  html += "input { width: 100%; padding: 12px; margin: 10px 0; border: 1px solid #ddd; border-radius: 8px; box-sizing: border-box; }";
+  html += "button { width: 100%; background: #48bb78; color: white; border: none; padding: 15px; border-radius: 8px; cursor: pointer; font-weight: bold; font-size: 16px; transition: 0.3s; }";
+  html += "button:hover { background: #38a169; }";
+  html += "table { width: 100%; margin-top: 20px; border-collapse: collapse; font-size: 14px; }";
+  html += "th, td { padding: 10px; border-bottom: 1px solid #eee; text-align: left; }";
+  html += "</style></head><body>";
+
+  html += "<div class='container'>";
+  html += "<h2>Sistem Absensi Suara</h2>";
+  
+  html += "<div class='status-box' id='statusBox'>";
+  html += "Silahkan Tap Kartu...";
+  html += "</div>";
+
+  html += "<form action='/save' method='POST'>";
+  html += "<input type='text' name='nama' placeholder='Nama Siswa' required>";
+  html += "<input type='text' name='kelas' placeholder='Kelas' required>";
+  html += "<button type='submit'>Daftarkan Siswa</button>";
+  html += "</form>";
+
+  html += "<table><tr><th>Nama</th><th>Status</th></tr>";
+  for(int i = 0; i < userCount; i++) {
+    html += "<tr><td>" + users[i].nama + "</td><td>" + (users[i].isInside ? "Inside" : "Outside") + "</td></tr>";
+  }
+  html += "</table></div>";
+
+  // JAVASCRIPT UNTUK SUARA & AUTO REFRESH DATA
+  html += "<script>";
+  html += "let lastAudioName = '';";
+  html += "let lastAudioAction = '';";
+  
+  html += "function checkNewTap() {";
+  html += "  fetch('/get_last_tap').then(response => response.json()).then(data => {";
+  html += "    if(data.nama !== '' && (data.nama !== lastAudioName || data.action !== lastAudioAction)) {";
+  html += "      let msg = '';";
+  html += "      if(data.action === 'masuk') msg = 'Selamat datang ' + data.nama;";
+  else           msg = 'Sampai jumpa lagi ' + data.nama;
+  html += "      let speech = new SpeechSynthesisUtterance();";
+  html += "      speech.lang = 'id-ID'; speech.text = msg; speech.rate = 1;";
+  html += "      window.speechSynthesis.speak(speech);";
+  html += "      lastAudioName = data.nama; lastAudioAction = data.action;";
+  html += "      document.getElementById('statusBox').innerHTML = '<strong>' + msg + '</strong>';";
+  html += "      setTimeout(() => { location.reload(); }, 3000);"; // Reload setelah bicara
+  html += "    }";
+  html += "  });";
+  html += "}";
+  html += "setInterval(checkNewTap, 1000);"; // Cek tiap 1 detik
+  html += "</script></body></html>";
+  
+  return html;
+}
+
+void handleGetLastTap() {
+  String json = "{\"nama\":\"" + lastScannedName + "\", \"action\":\"" + lastStatusAction + "\"}";
+  server.send(200, "application/json", json);
+}
+
+void handleSave() {
+  // Fitur pendaftaran hanya bekerja jika ada kartu yang barusan di-tap tapi belum terdaftar
+  // Untuk simulasi, kita pakai UID terakhir yang terdeteksi
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
+
+void setup() {
+  Serial.begin(115200);
+  SPI.begin();
+  rfid.PCD_Init();
+  lcd.begin(16, 2);
+  
+  WiFi.softAP(ssid, password);
+  lcd.print("WiFi Ready");
+  
+  server.on("/", handleRoot);
+  server.on("/save", HTTP_POST, handleSave);
+  server.on("/get_last_tap", handleGetLastTap);
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+
+  if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
+    String strID = "";
+    for (byte i = 0; i < rfid.uid.size; i++) {
+      strID += String(rfid.uid.uidByte[i] < 0x10 ? "0" : "");
+      strID += String(rfid.uid.uidByte[i], HEX);
+    }
+    strID.toUpperCase();
+
+    // Cari apakah user sudah terdaftar
+    bool found = false;
+    for (int i = 0; i < userCount; i++) {
+      if (users[i].uid == strID) {
+        users[i].isInside = !users[i].isInside; // Toggle status
+        lastScannedName = users[i].nama;
+        lastStatusAction = users[i].isInside ? "masuk" : "keluar";
+        
+        lcd.clear();
+        lcd.print(lastStatusAction == "masuk" ? "Halo " : "Bye ");
+        lcd.setCursor(0,1);
+        lcd.print(lastScannedName);
+        found = true;
+        break;
+      }
+    }
+
+    if (!found) {
+      // Jika kartu baru (belum terdaftar)
+      lastScannedName = "Tamu";
+      lastStatusAction = "masuk";
+      // Logika pendaftaran bisa ditambahkan di sini
+    }
+
+    delay(1000); 
+    rfid.PICC_HaltA();
+    rfid.PCD_StopCrypto1();
+  }
+}
+
+void handleRoot() {
+  server.send(200, "text/html", getHTML());
+}
